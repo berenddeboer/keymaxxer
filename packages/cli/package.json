@@ -1,0 +1,13 @@
+{
+  "name": "keymaxxer",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "keymaxxer": "src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "keymaxxer-sdk": "workspace:*",
+    "zod": "latest"
+  }
+}
