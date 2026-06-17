@@ -4,12 +4,11 @@
  * standalone binary. Used to spawn the agent daemon as a child process.
  */
 export function selfCommand(extraArgs: string[]): { cmd: string; args: string[] } {
-  const entry = process.argv[1] ?? "";
-  // Running as a script under a runtime (bun src/index.ts, node dist/cli.mjs):
-  // re-invoke that same runtime with the script path.
-  if (/\.(ts|js|mjs|cjs)$/.test(entry)) {
-    return { cmd: process.execPath, args: [entry, ...extraArgs] };
-  }
-  // Compiled standalone binary: process.execPath is the keymaxxer binary itself.
+  // keymaxxer always runs as a script under a runtime: `bun src/index.ts`,
+  // `node dist/cli.mjs`, or a node-symlinked global/npx bin (which may have no
+  // file extension at all). Re-invoke the same runtime with the same entry —
+  // node follows the symlink, bun runs the .ts. Do NOT key off the extension.
+  const entry = process.argv[1];
+  if (entry) return { cmd: process.execPath, args: [entry, ...extraArgs] };
   return { cmd: process.execPath, args: [...extraArgs] };
 }
