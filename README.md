@@ -31,16 +31,20 @@ coding agent ◀─ exit code + scrubbed output (never the secret)
 ## Quick start
 
 ```bash
-npm install -g keymaxxer        # or prefix any command with `npx keymaxxer …`
+# install (or prefix any command with `npx keymaxxer …`)
+npm install -g keymaxxer
 
-keymaxxer init                  # create the vault (prompts for a passphrase)
+# create the vault (prompts for a passphrase)
+keymaxxer init
 
-keymaxxer set GITHUB_TOKEN --tag github   # prompts you to paste the value (hidden, never in shell history)
-keymaxxer list                            # GITHUB_TOKEN [github] — never used
+# store a secret — paste it at the hidden prompt (never in shell history)
+keymaxxer set GITHUB_TOKEN --tag github
+keymaxxer list
 keymaxxer run --secrets GITHUB_TOKEN -- 'gh api /user'
 
-keymaxxer lock                            # wipe the key from memory
-keymaxxer unlock                          # later: unlock again with your passphrase
+# wipe the key from memory; unlock again later with your passphrase
+keymaxxer lock
+keymaxxer unlock
 ```
 
 `keymaxxer init` also drops a `keymaxxer` MCP server into `.mcp.json` so Claude Code,
@@ -89,10 +93,10 @@ Beyond a name and value, each secret carries structured attributes so an agent
 can pick the *right* credential instead of guessing from the name:
 
 ```bash
+# paste the token at the hidden prompt when asked
 keymaxxer set ORB_DEV_TOKEN \
   --provider orb --account turso --env dev --access read-write \
   --description "Orb developer account"
-# then paste the token at the hidden prompt
 ```
 
 `keymaxxer_list` returns `provider`, `account`, `environment` (prod/dev/staging),
@@ -173,7 +177,8 @@ in-process.
 
 ```bash
 bun install
-bun packages/sdk/smoke.test.ts   # core loop: encryption, injection, scrubbing, audit
+# SDK smoke test + the end-to-end integration suite
+bun run test
 ```
 
 Workspace layout: `packages/sdk` (KDF, vault metadata, `SecretStore`, `Runner`,
