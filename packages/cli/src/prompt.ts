@@ -97,14 +97,16 @@ export function promptPassphraseGui(message: string): Promise<string | null> {
     const script =
       `display dialog ${asAppleScript(message)} default answer "" with hidden answer ` +
       `with title "keymaxxer — unlock vault" ` +
-      `buttons {"Cancel", "Unlock"} default button "Unlock" cancel button "Cancel"`;
+      `buttons {"Cancel", "Unlock"} default button "Unlock" cancel button "Cancel" ` +
+      `giving up after 120`;
     const proc = spawn("osascript", ["-e", script]);
     let out = "";
     proc.stdout.on("data", (c) => (out += c.toString()));
     proc.on("error", () => resolve(null)); // osascript missing
     proc.on("close", (code) => {
       if (code !== 0) return resolve(null); // Cancel / Esc
-      const m = out.match(/text returned:([\s\S]*)$/);
+      if (/gave up:true/.test(out)) return resolve(null); // timed out, no input
+      const m = out.match(/text returned:([\s\S]*?)(?:, gave up:[^,]*)?$/);
       resolve(m ? m[1].replace(/\n$/, "") : "");
     });
   });

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 #
-# End-to-end integration test for keymaxxer: drives the real CLI + agent daemon in
-# an isolated $HOME, with no OS keychain and no GUI prompts (KEYMAXXER_APPROVE forces
-# approval decisions headlessly). Exits non-zero if any assertion fails.
+# End-to-end integration test for keymaxxer (no-daemon model): each command opens
+# the encrypted vault on demand. Uses KEYMAXXER_MASTER_KEY / KEYMAXXER_PASSPHRASE
+# and KEYMAXXER_APPROVE so it runs fully headless. Exits non-zero on any failure.
 #
 #   bash test/integration.sh
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$SCRIPT_DIR/.." && pwd)
 SH="bun $REPO/packages/cli/src/index.ts"
-PASS="integ-pass-1234"
+K=b1bbfda4f589dc9daaf004fe21111e00dc00c98237102f5c7002a5669fc76327
 
 T=$(mktemp -d)
 export HOME="$T"
-unset KEYMAXXER_MASTER_KEY 2>/dev/null
 
 OK=0
 KO=0
@@ -23,77 +22,53 @@ contains() { case "$2" in *"$3"*) pass "$1" ;; *) fail "$1 -- got: $(printf '%s'
 absent()   { case "$2" in *"$3"*) fail "$1 -- unexpectedly contains '$3'" ;; *) pass "$1" ;; esac; }
 mode()     { ls -ld "$1" | awk '{print substr($1,1,10)}'; }
 
-cleanup() { KEYMAXXER_APPROVE=allow $SH lock >/dev/null 2>&1; rm -rf "$T"; }
+cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-echo "## lifecycle"
-out=$(printf '%s\n%s\n' "$PASS" "$PASS" | KEYMAXXER_APPROVE=allow $SH init 2>&1)
-contains "init creates the vault" "$out" "Vault created"
-contains "init auto-unlocks the agent" "$out" "unlocked into the background agent"
-contains "status reports unlocked" "$($SH status)" "Unlocked"
-
-echo "## permissions"
-contains "keymaxxer dir is 0700" "$(mode "$T/.keymaxxer")" "drwx------"
-contains "agent socket is 0600" "$(mode "$T/.keymaxxer/agent.sock")" "srw-------"
+echo "## vault setup (env key, no daemon)"
+contains "init creates the vault" "$(KEYMAXXER_MASTER_KEY=$K $SH init 2>&1)" "Vault created"
+contains "vault dir is 0700" "$(mode "$T/.keymaxxer")" "drwx------"
 
 echo "## secrets + metadata"
-printf %s 'sk_test_abc'    | $SH set RO_KEY  --provider stripe --account acme --env dev  --access read-only  --tag pay >/dev/null
-printf %s 'prod_secret_v1' | $SH set PROD_RW --provider stripe --account acme --env prod --access read-write          >/dev/null
-contains "list shows structured attributes" "$($SH list)" "stripe · acme · dev · read-only"
+printf %s 'sk_test_abc'    | KEYMAXXER_MASTER_KEY=$K $SH set RO_KEY  --provider stripe --account acme --env dev  --access read-only  --tag pay >/dev/null
+printf %s 'prod_secret_v1' | KEYMAXXER_MASTER_KEY=$K $SH set PROD_RW --provider stripe --account acme --env prod --access read-write          >/dev/null
+contains "list shows structured attributes" "$(KEYMAXXER_MASTER_KEY=$K $SH list)" "stripe · acme · dev · read-only"
 
 echo "## injection + scrubbing"
-contains "literal value is scrubbed (stdout)" "$($SH run --secrets RO_KEY -- 'echo v=$RO_KEY' 2>/dev/null)" "v=***"
-contains "stderr is scrubbed too" "$($SH run --secrets RO_KEY -- 'echo e=$RO_KEY 1>&2' 2>&1 1>/dev/null)" "e=***"
-contains "every occurrence is replaced" "$($SH run --secrets RO_KEY -- 'echo $RO_KEY-$RO_KEY-$RO_KEY' 2>/dev/null)" "***-***-***"
-absent   "raw value never appears in output" "$($SH run --secrets RO_KEY -- 'echo $RO_KEY 1>&2; echo $RO_KEY' 2>&1)" "sk_test_abc"
-absent   "transformed value is NOT scrubbed (documented limitation)" "$($SH run --secrets RO_KEY -- 'printf %s \"$RO_KEY\" | base64' 2>/dev/null)" "***"
-if $SH run --secrets NOPE -- 'true' >/dev/null 2>&1; then fail "unknown secret should fail closed"; else pass "unknown secret fails closed"; fi
+contains "literal value is scrubbed (stdout)" "$(KEYMAXXER_MASTER_KEY=$K $SH run --secrets RO_KEY -- 'echo v=$RO_KEY' 2>/dev/null)" "v=***"
+contains "stderr is scrubbed too" "$(KEYMAXXER_MASTER_KEY=$K $SH run --secrets RO_KEY -- 'echo e=$RO_KEY 1>&2' 2>&1 1>/dev/null)" "e=***"
+contains "every occurrence is replaced" "$(KEYMAXXER_MASTER_KEY=$K $SH run --secrets RO_KEY -- 'echo $RO_KEY-$RO_KEY-$RO_KEY' 2>/dev/null)" "***-***-***"
+absent   "raw value never appears in output" "$(KEYMAXXER_MASTER_KEY=$K $SH run --secrets RO_KEY -- 'echo $RO_KEY 1>&2; echo $RO_KEY' 2>&1)" "sk_test_abc"
+absent   "transformed value is NOT scrubbed (documented limitation)" "$(KEYMAXXER_MASTER_KEY=$K $SH run --secrets RO_KEY -- 'printf %s \"$RO_KEY\" | base64' 2>/dev/null)" "***"
+if KEYMAXXER_MASTER_KEY=$K $SH run --secrets NOPE -- 'true' >/dev/null 2>&1; then fail "unknown secret should fail closed"; else pass "unknown secret fails closed"; fi
 
 echo "## encryption at rest"
 if head -c 16 "$T/.keymaxxer/vault.db" | grep -q "SQLite format 3"; then fail "vault must not be plaintext SQLite"; else pass "vault is encrypted at rest"; fi
 
-echo "## multiprocess_wal (second opener while daemon holds the vault)"
-conc=$(cd "$REPO" && HOME="$T" KEYMAXXER_TEST_PASS="$PASS" bun -e '
-  import { SecretStore, loadMeta, deriveKey } from "keymaxxer-sdk";
+echo "## multiprocess_wal (two concurrent opens of the same vault)"
+conc=$(cd "$REPO" && HOME="$T" KEYMAXXER_MASTER_KEY=$K bun -e '
+  import { SecretStore } from "keymaxxer-sdk";
   const v = process.env.HOME + "/.keymaxxer/vault.db";
-  const m = loadMeta(v);
-  const s = await SecretStore.open({ path: v, hexkey: deriveKey(process.env.KEYMAXXER_TEST_PASS, m.salt, m.scrypt) });
-  process.stdout.write("CONC_OK:" + (await s.list()).length);
-  await s.close();
+  const a = await SecretStore.open({ path: v, hexkey: process.env.KEYMAXXER_MASTER_KEY });
+  const b = await SecretStore.open({ path: v, hexkey: process.env.KEYMAXXER_MASTER_KEY });
+  process.stdout.write("CONC:" + (await a.list()).length + "/" + (await b.list()).length);
+  await a.close(); await b.close();
 ' 2>&1)
-contains "a second process can open the vault concurrently" "$conc" "CONC_OK:"
+contains "two processes open the vault concurrently" "$conc" "CONC:2/2"
 
-echo "## lock / locked / unlock"
-$SH lock >/dev/null 2>&1
-contains "status reports locked" "$($SH status)" "Locked"
-contains "locked vault rejects operations" "$($SH list 2>&1)" "locked"
-$SH lock >/dev/null 2>&1
-contains "wrong passphrase is rejected" "$(printf '%s\n' 'definitely-wrong' | KEYMAXXER_APPROVE=allow $SH unlock 2>&1)" "wrong passphrase"
-printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=allow $SH unlock >/dev/null 2>&1
-contains "correct passphrase unlocks" "$($SH status)" "Unlocked"
+echo "## approval (CLI run)"
+contains "read-only/dev runs without approval" "$(KEYMAXXER_MASTER_KEY=$K KEYMAXXER_APPROVE=deny $SH run --secrets RO_KEY -- 'echo ro=$RO_KEY' 2>/dev/null)" "ro=***"
+contains "read-write/prod is denied" "$(KEYMAXXER_MASTER_KEY=$K KEYMAXXER_APPROVE=deny $SH run --secrets PROD_RW -- 'echo $PROD_RW' 2>&1)" "was not approved"
+contains "denial is recorded in the audit log" "$(KEYMAXXER_MASTER_KEY=$K $SH audit --limit 10)" "DENIED"
+contains "sensitive runs once approved" "$(KEYMAXXER_MASTER_KEY=$K KEYMAXXER_APPROVE=allow $SH run --secrets PROD_RW -- 'echo rw=$PROD_RW' 2>/dev/null)" "rw=***"
 
-echo "## approval policy (deny)"
-$SH lock >/dev/null 2>&1
-printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=deny $SH unlock >/dev/null 2>&1
-contains "read-only/dev runs without approval" "$($SH run --secrets RO_KEY -- 'echo ro=$RO_KEY' 2>/dev/null)" "ro=***"
-contains "read-write/prod is denied" "$($SH run --secrets PROD_RW -- 'echo $PROD_RW' 2>&1)" "was not approved"
-contains "denial is recorded in the audit log" "$($SH audit --limit 10)" "DENIED"
-
-echo "## approval policy (allow once)"
-$SH lock >/dev/null 2>&1
-printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=allow $SH unlock >/dev/null 2>&1
-contains "sensitive secret runs once approved" "$($SH run --secrets PROD_RW -- 'echo rw=$PROD_RW' 2>/dev/null)" "rw=***"
-absent   "an 'allow once' approval does not persist" "$($SH status)" "Session-approved"
-
-echo "## approval policy (allow for session)"
-$SH lock >/dev/null 2>&1
-printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=session $SH unlock >/dev/null 2>&1
-$SH run --secrets PROD_RW -- 'echo first=$PROD_RW' >/dev/null 2>&1   # first use grants the session
-contains "secret is remembered for the session" "$($SH status)" "Session-approved (no re-prompt until lock): PROD_RW"
-contains "session-approved secret runs again" "$($SH run --secrets PROD_RW -- 'echo again=$PROD_RW' 2>/dev/null)" "again=***"
-$SH lock >/dev/null 2>&1
-printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=deny $SH unlock >/dev/null 2>&1
-absent   "session approval is cleared after lock" "$($SH status)" "Session-approved"
+echo "## passphrase path"
+T2=$(mktemp -d)
+HOME="$T2" KEYMAXXER_PASSPHRASE=passphrase123 $SH init >/dev/null 2>&1
+printf %s 'pval' | HOME="$T2" KEYMAXXER_PASSPHRASE=passphrase123 $SH set PK --env dev --access read-only >/dev/null
+contains "passphrase-derived key opens the vault" "$(HOME="$T2" KEYMAXXER_PASSPHRASE=passphrase123 $SH list)" "PK"
+contains "wrong passphrase is rejected" "$(HOME="$T2" KEYMAXXER_PASSPHRASE=nope $SH list 2>&1)" "wrong passphrase"
+rm -rf "$T2"
 
 echo
 if [ "$KO" -eq 0 ]; then

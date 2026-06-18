@@ -1,16 +1,47 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SecretStore } from "keymaxxer-sdk";
 import { z } from "zod";
-import { ensureUnlockedClient } from "./client.js";
+import { openVaultServe, runGated } from "./client.js";
 
 /**
- * Start the keymaxxer MCP server on stdio. It holds no key: every call is resolved
- * through the agent daemon (or an env key in CI). The agent never receives a
- * raw secret value — keymaxxer_list returns names only, keymaxxer_run returns scrubbed
- * output.
+ * Start the keymaxxer MCP server on stdio. This process IS the session's
+ * keyholder: it unlocks the vault once (on first use, via a native passphrase
+ * dialog), holds the key in its own memory, and clears it when the session ends.
+ * "Allow for the session" therefore lasts exactly as long as this server, and
+ * approvals are never shared with other sessions. Secret values never reach the
+ * model — keymaxxer_list returns names only, keymaxxer_run returns scrubbed output.
  */
 export async function serve(): Promise<void> {
-  const server = new McpServer({ name: "keymaxxer", version: "0.1.0" });
+  let store: SecretStore | null = null;
+  const approved = new Set<string>();
+  let lastActivity = Date.now();
+
+  // Optional: re-lock (drop the key) after N minutes idle. Off by default — the
+  // vault stays unlocked for the whole session.
+  const idleMs = Math.max(0, Number(process.env.KEYMAXXER_IDLE_MINUTES) || 0) * 60_000;
+  if (idleMs > 0) {
+    const timer = setInterval(() => {
+      if (store && Date.now() - lastActivity > idleMs) {
+        void store.close().catch(() => {});
+        store = null;
+        approved.clear();
+      }
+    }, 5_000);
+    timer.unref();
+  }
+
+  async function vault(): Promise<SecretStore> {
+    lastActivity = Date.now();
+    if (!store) {
+      store = await openVaultServe(
+        "An agent wants to use a secret. Enter your keymaxxer passphrase to unlock the vault:",
+      );
+    }
+    return store;
+  }
+
+  const server = new McpServer({ name: "keymaxxer", version: "0.2.0" });
 
   server.registerTool(
     "keymaxxer_list",
@@ -21,9 +52,7 @@ export async function serve(): Promise<void> {
     },
     async () => {
       try {
-        const client = await ensureUnlockedClient();
-        const metas = await client.list();
-        await client.close();
+        const metas = await (await vault()).list();
         return { content: [{ type: "text", text: JSON.stringify(metas, null, 2) }] };
       } catch (err) {
         return { content: [{ type: "text", text: errText(err) }], isError: true };
@@ -35,19 +64,17 @@ export async function serve(): Promise<void> {
     "keymaxxer_run",
     {
       description:
-        "Run a shell command with secrets injected as environment variables. Reference each secret as $NAME (e.g. \"gh api /user\" with GITHUB_TOKEN, or curl -H \"Authorization: Bearer $TOKEN\"). Secret values are injected into the child process only; they are scrubbed from the returned output and never exposed to you. Use keymaxxer_list to find available names. Note: if the vault is locked the human is prompted to unlock it (the call may pause). Read-write or production secrets are gated — the human approves the use and may allow it just once or for the whole session; the call may pause and can be denied. If denied, pick a less-privileged secret or ask the user. Don't tell the user to run `keymaxxer unlock` themselves — just make the call and it will prompt them.",
+        "Run a shell command with secrets injected as environment variables. Reference each secret as $NAME (e.g. \"gh api /user\" with GITHUB_TOKEN, or curl -H \"Authorization: Bearer $TOKEN\"). Secret values are injected into the child process only; they are scrubbed from the returned output and never exposed to you. Use keymaxxer_list to find available names. Note: if the vault is locked the human is prompted to unlock it (the call may pause). Read-write or production secrets are gated — the human approves the use and may allow it just once or for the whole session; the call may pause and can be denied. If denied, pick a less-privileged secret or ask the user. Don't tell the user to unlock manually — just make the call and it will prompt them.",
       inputSchema: {
         command: z.string().describe("Shell command to run. Reference secrets as $NAME."),
         secrets: z.array(z.string()).describe("Names of secrets to inject as environment variables."),
-        cwd: z.string().optional().describe("Working directory. Defaults to the agent's cwd."),
+        cwd: z.string().optional().describe("Working directory. Defaults to the server's cwd."),
         timeoutMs: z.number().optional().describe("Kill the command after this many milliseconds."),
       },
     },
     async (args) => {
       try {
-        const client = await ensureUnlockedClient();
-        const res = await client.run(args);
-        await client.close();
+        const res = await runGated(await vault(), args, approved);
         const lines = [
           `exit_code: ${res.exitCode}`,
           res.redactions > 0 ? `[keymaxxer] redacted ${res.redactions} secret occurrence(s)` : null,

@@ -10,22 +10,19 @@ its context window, its transcript, or your LLM provider's logs.
 
 keymaxxer stores secrets in a single [Turso](https://turso.tech) database encrypted
 at rest with AES-256-GCM. The encryption key is **derived from your passphrase
-and never written to disk**. You unlock the vault once into a small background
-**daemon**; it holds the key in memory and is the only process that ever
-touches secret values. Your coding agent talks to keymaxxer over MCP: it can see
-secret *names*, ask keymaxxer to run a command with those secrets injected as
-environment variables, and get back output with every secret value scrubbed out.
+and never written to disk**. Each MCP server — **one per coding-agent session** —
+unlocks the vault the first time it's needed and holds the key in its own memory
+for the life of that session. Your coding agent talks to keymaxxer over MCP: it
+sees secret *names*, asks keymaxxer to run a command with those secrets injected
+as environment variables, and gets back output with every secret value scrubbed.
 
 ```
-you ─ unlock once (passphrase) ─▶ keymaxxer daemon
-                                 holds key in RAM, opens vault
-
-coding agent ─ run(cmd, secret names) ─▶ keymaxxer MCP server
-                                         (no key; calls daemon)
-
-daemon: inject secret → run command → scrub output
-
+coding agent ─ run(cmd, secret names) ─▶ keymaxxer serve  (one per session)
+   first use ─▶ asks you to unlock (passphrase dialog); key held in memory
+               inject secret → run command → scrub output
 coding agent ◀─ exit code + scrubbed output (never the secret)
+
+session ends ─▶ key + approvals wiped
 ```
 
 ## Quick start
@@ -41,10 +38,6 @@ keymaxxer init
 keymaxxer set GITHUB_TOKEN --tag github
 keymaxxer list
 keymaxxer run --secrets GITHUB_TOKEN -- 'gh api /user'
-
-# wipe the key from memory; unlock again later with your passphrase
-keymaxxer lock
-keymaxxer unlock
 ```
 
 `keymaxxer init` drops a `keymaxxer` MCP server into the project's `.mcp.json`, so
@@ -72,28 +65,29 @@ Two MCP tools, neither of which ever returns a secret value:
 // the agent calls:
 { "command": "curl -H \"Authorization: Bearer $OPENAI_KEY\" https://api.openai.com/v1/models",
   "secrets": ["OPENAI_KEY"] }
-// keymaxxer runs it inside the agent daemon and returns stdout/stderr with every
+// keymaxxer runs it inside the MCP server and returns stdout/stderr with every
 // occurrence of the key replaced by ***
 ```
 
-If the vault is locked, the tools return "vault is locked — run `keymaxxer unlock`",
-so the model never blocks on a secret it can't get.
+If the vault is locked, the first tool call prompts **you** to unlock it (a native
+passphrase dialog) — the agent just makes the call and waits.
 
 ## CLI
 
 | Command | Description |
 | --- | --- |
 | `keymaxxer init` | Create the encrypted vault (prompts for a passphrase) |
-| `keymaxxer unlock [--timeout m]` | Unlock into the background agent (default 15 min idle) |
-| `keymaxxer lock` | Lock the vault and stop the agent |
-| `keymaxxer status` | Show whether the vault is unlocked |
-| `keymaxxer set <NAME> [attrs]` | Store a secret (value from **stdin**); attrs: `--provider --account --env --access --tag --description` |
+| `keymaxxer set <NAME> [attrs]` | Store a secret (paste at a hidden prompt); attrs: `--provider --account --env --access --tag --description` |
 | `keymaxxer import <file>` | Import `KEY=VALUE` lines from a `.env`-style file |
 | `keymaxxer list` | List secret names + metadata (never values) |
 | `keymaxxer rm <NAME>` | Delete a secret |
 | `keymaxxer run --secrets a,b -- <cmd>` | Run a command with secrets injected as env vars |
 | `keymaxxer audit [--limit N]` | Show the recent secret-access log |
-| `keymaxxer serve` | Start the MCP server on stdio (proxies to the agent) |
+| `keymaxxer serve` | Start the MCP server on stdio (holds the key for the session) |
+
+Each command opens the vault on demand — it prompts for your passphrase, or reads
+`KEYMAXXER_PASSPHRASE` / `KEYMAXXER_MASTER_KEY`. There's no separate unlock step
+and no background daemon.
 
 ## Secret attributes
 
@@ -118,38 +112,41 @@ job. Rotating a value with `keymaxxer set` preserves the attributes.
 Both interactions happen through a native dialog, so an agent can keep working
 and you never drop to a terminal:
 
-- **Locked vault.** When an agent calls a tool against a locked vault, keymaxxer
-  pops a dialog asking for your passphrase and unlocks it in place. (Agents are
-  told *not* to suggest `keymaxxer unlock` — the call itself prompts you.)
+- **Locked vault.** The first time a session's tool call needs the vault,
+  keymaxxer pops a dialog asking for your passphrase and unlocks it in place.
+  (Agents are told *not* to ask you to unlock manually — the call itself prompts.)
 - **Sensitive use.** Using a **read-write** or **production** secret is gated.
   The dialog shows the secret and the exact command and offers **Deny**,
   **Allow once**, or **Allow for the session**. *Allow for the session* remembers
-  that one secret until the vault locks, so you aren't re-prompted on every call.
-  Read-only / non-prod secrets run with no prompt.
+  that one secret **for that agent's session only** — it's never shared with other
+  sessions — so you aren't re-prompted on every call. Read-only / non-prod secrets
+  run with no prompt.
 
 This is the human-in-the-loop control that catches a command which would
-otherwise misuse a credential (see the threat model). `keymaxxer status` lists
-the secrets approved for the current session. For headless/CI, set
-`KEYMAXXER_APPROVE=deny|once|session` and `KEYMAXXER_PASSPHRASE` to unlock
-non-interactively.
+otherwise misuse a credential (see the threat model). For headless/CI, set
+`KEYMAXXER_APPROVE=deny|once|session` and `KEYMAXXER_PASSPHRASE` (or
+`KEYMAXXER_MASTER_KEY`) to run non-interactively.
 
 ## Where things live, and how access is controlled
 
-- **Vault:** one global `~/.keymaxxer/vault.db` per user, inside `~/.keymaxxer`
-  (directory `0700`, socket `0600` — only you can reach the agent).
+- **Vault:** one global `~/.keymaxxer/vault.db` per user, in `~/.keymaxxer`
+  (directory `0700` — only you can read it).
 - **Encryption key:** **stored nowhere.** It is derived from your passphrase
   with scrypt (a non-secret salt lives in `~/.keymaxxer/vault.meta.json`). Copying
   `vault.db` off the machine yields nothing — there is no key at rest.
-- **Who can unseal:** whoever knows the passphrase. Not your coding agent.
-- **Who can use a secret:** whoever can reach the unlocked agent's unix socket
-  (`~/.keymaxxer/agent.sock`, `0600` — same user); sensitive uses additionally
-  require your interactive approval.
-- **When:** only while unlocked. The agent auto-locks after idle (default 15
-  min), on `keymaxxer lock`, and on reboot. It's an explicit seal/unseal, not a
-  standing grant.
-- **CI / headless:** set `KEYMAXXER_MASTER_KEY` (64-hex) and skip unlock entirely —
-  keymaxxer opens the vault directly with the key your platform supplies, exactly
-  like the [Turso credentials gateway](https://turso.tech/blog/why-we-chose-turso-to-secure-ai-credentials).
+- **Who holds the key:** each process that needs it, only while it runs — an MCP
+  server for its session, a CLI command for one invocation. There is **no shared
+  daemon**; nothing keeps the key after the process exits.
+- **Who can unlock:** whoever knows the passphrase. Not your coding agent.
+- **Who can use a secret:** any process that can derive the key (your passphrase,
+  or `KEYMAXXER_MASTER_KEY`); sensitive uses additionally require your interactive
+  approval, scoped to the requesting session.
+- **When:** for the life of the session — the key is wiped when the MCP server (or
+  CLI command) exits, so closing the session locks it. Optionally set
+  `KEYMAXXER_IDLE_MINUTES` to also re-lock a server after inactivity.
+- **CI / headless:** set `KEYMAXXER_MASTER_KEY` (64-hex) — keymaxxer opens the
+  vault directly with the key your platform supplies, exactly like the
+  [Turso credentials gateway](https://turso.tech/blog/why-we-chose-turso-to-secure-ai-credentials).
 
 ## Threat model — read this
 
@@ -171,12 +168,11 @@ keeping the value out of the model's context, and **approval-on-use** for
 sensitive secrets (you see the command and can deny it).
 
 **It does not defend against** a fully malicious process running as the *same OS
-user while the vault is unlocked* — it can talk to the agent socket or read the
-agent's memory. That is irreducible without OS-level isolation; no local key
-store changes it. keymaxxer keeps secrets out of the model's context, makes access
-ephemeral and explicit, and puts a human in the loop for sensitive use; for
-stronger isolation, run the agent as a separate user or in a sandbox — it
-composes cleanly.
+user while a session holds the key* — it can read that process's memory. That is
+irreducible without OS-level isolation; no local key store changes it. keymaxxer
+keeps secrets out of the model's context, makes access ephemeral (per session)
+and explicit, and puts a human in the loop for sensitive use; for stronger
+isolation, run the agent as a separate user or in a sandbox — it composes cleanly.
 
 ## Built with Turso
 
@@ -201,4 +197,4 @@ bun run test
 ```
 
 Workspace layout: `packages/sdk` (KDF, vault metadata, `SecretStore`, `Runner`,
-`Scrubber`) and `packages/cli` (commands, the agent daemon, and the MCP server).
+`Scrubber`) and `packages/cli` (commands, approval gating, and the MCP server).

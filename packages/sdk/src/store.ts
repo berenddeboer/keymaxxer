@@ -1,5 +1,5 @@
 import { connect } from "@tursodatabase/database";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { runWithSecrets } from "./runner.js";
@@ -54,6 +54,11 @@ export class SecretStore {
   static async open(opts: OpenOptions): Promise<SecretStore> {
     const path = opts.path ?? defaultVaultPath();
     mkdirSync(dirname(path), { recursive: true });
+    try {
+      chmodSync(dirname(path), 0o700); // only the owner may reach the vault
+    } catch {
+      /* best-effort */
+    }
     try {
       const db = (await connect(path, {
         encryption: { cipher: opts.cipher ?? DEFAULT_CIPHER, hexkey: opts.hexkey },
