@@ -47,6 +47,31 @@ function dialog(message: string, prefill: string, saveLabel: string): Promise<st
   });
 }
 
+/**
+ * Show a message-only dialog (no input field) so a long value wraps and is fully
+ * readable. Resolves "save", "edit", or null (dismissed / timed out / not macOS).
+ */
+function confirm(message: string): Promise<"save" | "edit" | null> {
+  if (process.platform !== "darwin") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const body = message.split("\n").map(asAppleScript).join(" & return & ");
+    const script =
+      `display dialog ${body} with title "keymaxxer — add secret" ` +
+      `buttons {"Edit", "Save"} default button "Save" giving up after 180`;
+    const proc = spawn("osascript", ["-e", script]);
+    let out = "";
+    proc.stdout.on("data", (c) => (out += c.toString()));
+    proc.on("error", () => resolve(null));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(null);
+      if (/gave up:true/.test(out)) return resolve(null);
+      if (/button returned:Save/.test(out)) return resolve("save");
+      if (/button returned:Edit/.test(out)) return resolve("edit");
+      return resolve(null);
+    });
+  });
+}
+
 /** Split a string into tokens, honouring double quotes (and empty "" tokens). */
 function tokenize(s: string): string[] {
   const out: string[] = [];
@@ -102,18 +127,21 @@ function tokensToFields(tokens: string[]): SecretFields {
   return fields;
 }
 
-/** The editable attribute line shown in the first dialog, pre-filled. */
+/**
+ * The editable attribute line shown in the first dialog. Only the flags the
+ * agent actually suggested are pre-filled, so the line stays short and readable
+ * (a long pre-filled line scrolls the field to its end and hides the name).
+ */
 export function suggestionLine(s: AddSuggestion): string {
-  const q = (v?: string) => `"${(v ?? "").replace(/"/g, "'")}"`;
-  return [
-    s.name,
-    `--provider ${q(s.provider)}`,
-    `--account ${q(s.account)}`,
-    `--env ${q(s.environment)}`,
-    `--access ${q(s.access)}`,
-    `--tag ${q(s.tags)}`,
-    `--description ${q(s.description)}`,
-  ].join(" ");
+  const q = (v: string) => `"${v.replace(/"/g, "'")}"`;
+  const parts = [s.name];
+  if (s.provider) parts.push(`--provider ${q(s.provider)}`);
+  if (s.account) parts.push(`--account ${q(s.account)}`);
+  if (s.environment) parts.push(`--env ${q(s.environment)}`);
+  if (s.access) parts.push(`--access ${q(s.access)}`);
+  if (s.tags) parts.push(`--tag ${q(s.tags)}`);
+  if (s.description) parts.push(`--description ${q(s.description)}`);
+  return parts.join(" ");
 }
 
 /** Parse an edited attribute line back into a name + fields. */
@@ -131,19 +159,31 @@ export function parseSuggestionLine(line: string): { name: string; fields: Secre
  */
 export async function promptAddSecret(s: AddSuggestion): Promise<AddResult | null> {
   const edited = await dialog(
-    "Review and edit the new secret's name and attributes:",
+    "Edit the new secret's name and attributes. Available flags: --provider --account --env --access --tag --description",
     suggestionLine(s),
     "Next",
   );
   if (edited === null) return null;
   const { name, fields } = parseSuggestionLine(edited);
 
-  const value = await dialog(
-    `Value for ${name} (visible — it is saved to the vault, not shared with the agent):`,
-    "",
-    "Save",
-  );
-  if (value === null) return null;
-  if (!value) throw new Error("no value provided.");
+  // Enter the value, then confirm it on a wrapped, fully-readable screen (the
+  // single-line input field hides long tokens behind their tail). "Edit" loops
+  // back with the entered value pre-filled so it can be corrected.
+  let value = "";
+  for (;;) {
+    const entered = await dialog(
+      `Value for ${name} — saved to the vault, never shared with the agent:`,
+      value,
+      "Review",
+    );
+    if (entered === null) return null;
+    if (!entered) throw new Error("no value provided.");
+    value = entered;
+
+    const choice = await confirm(`Save this value for ${name}?\n\n${value}`);
+    if (choice === "save") break;
+    if (choice === null) return null;
+    // "edit" → loop, re-showing the value for correction
+  }
   return { name, value, fields };
 }
