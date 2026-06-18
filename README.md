@@ -47,8 +47,16 @@ keymaxxer lock
 keymaxxer unlock
 ```
 
-`keymaxxer init` also drops a `keymaxxer` MCP server into `.mcp.json` so Claude Code,
-Cursor, and other MCP clients pick it up automatically.
+`keymaxxer init` drops a `keymaxxer` MCP server into the project's `.mcp.json`, so
+Claude Code, Cursor, and other MCP clients pick it up **in that project**.
+
+To make keymaxxer available in **every** project in Claude Code, register it once
+at user scope instead (the package is global, but the MCP registration is per
+scope):
+
+```bash
+claude mcp add --scope user keymaxxer -- npx keymaxxer serve
+```
 
 ## How an agent uses it
 
