@@ -184,6 +184,9 @@ async function main() {
         return;
       }
       console.log(`Unlocked — vault ${st.vault}, idle ${st.idleSeconds}s / ${st.idleTimeoutSeconds}s timeout.`);
+      if (st.sessionApproved.length) {
+        console.log(`Session-approved (no re-prompt until lock): ${st.sessionApproved.join(", ")}`);
+      }
       return;
     }
 

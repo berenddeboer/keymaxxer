@@ -35,34 +35,46 @@ function describe(req: ApprovalRequest): string[] {
     `Secret: ${names}`,
     `Command: ${cmd}`,
     `Dir: ${req.cwd}`,
+    "Allow once = this command. Allow session = until the vault locks.",
   ];
 }
 
-/** Pop a native macOS dialog and resolve true only if the user clicks Allow. */
-function approveViaOsascript(req: ApprovalRequest): Promise<boolean> {
+/** A user's response to an approval prompt. */
+export type ApprovalDecision = "deny" | "once" | "session";
+
+/** Pop a native macOS dialog and resolve the user's choice. */
+function approveViaOsascript(req: ApprovalRequest): Promise<ApprovalDecision> {
   return new Promise((resolve) => {
     const body = describe(req).map(asQuote).join(" & return & ");
     const script =
       `display dialog ${body} with title "keymaxxer — approve secret use" ` +
-      `buttons {"Deny", "Allow"} default button "Deny" cancel button "Deny" giving up after 60`;
+      `buttons {"Deny", "Allow once", "Allow session"} default button "Allow once" ` +
+      `cancel button "Deny" giving up after 60`;
     const proc = spawn("osascript", ["-e", script]);
     let out = "";
     proc.stdout.on("data", (c) => (out += c.toString()));
-    proc.on("error", () => resolve(false)); // osascript missing → fail closed
-    proc.on("close", (code) => resolve(code === 0 && /button returned:Allow/.test(out)));
+    proc.on("error", () => resolve("deny")); // osascript missing → fail closed
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve("deny"); // Deny / Esc
+      if (/button returned:Allow session/.test(out)) return resolve("session");
+      if (/button returned:Allow once/.test(out)) return resolve("once");
+      return resolve("deny"); // timed out / unknown
+    });
   });
 }
 
 /**
- * Ask the human to approve a sensitive secret use. The `KEYMAXXER_APPROVE`
- * environment variable forces a decision ("allow"/"deny") for headless/CI use
- * and tests. Otherwise we prompt natively on macOS; with no interactive channel
- * available we fail closed (deny).
+ * Ask the human to approve a sensitive secret use. Returns "deny", "once" (this
+ * command only), or "session" (allow this secret until the vault locks). The
+ * `KEYMAXXER_APPROVE` env forces a decision (deny | once | allow | session) for
+ * headless/CI use and tests. Otherwise we prompt natively on macOS; with no
+ * interactive channel we fail closed (deny).
  */
-export async function requestApproval(req: ApprovalRequest): Promise<boolean> {
+export async function requestApproval(req: ApprovalRequest): Promise<ApprovalDecision> {
   const override = (process.env.KEYMAXXER_APPROVE ?? "").toLowerCase();
-  if (override === "allow") return true;
-  if (override === "deny") return false;
+  if (override === "deny") return "deny";
+  if (override === "session") return "session";
+  if (override === "allow" || override === "once") return "once";
   if (process.platform === "darwin") return approveViaOsascript(req);
-  return false;
+  return "deny";
 }

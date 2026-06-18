@@ -113,14 +113,25 @@ With those, an agent matches the provider/account a task targets, prefers the
 right environment, and prefers the least-privileged credential that can do the
 job. Rotating a value with `keymaxxer set` preserves the attributes.
 
-## Approval on use
+## Approval & unlocking — without leaving your editor
 
-Using a **read-write** or **production** secret is gated: when an agent calls
-`keymaxxer_run` with such a secret, the daemon asks **you** to approve it
-(a native dialog on macOS), showing the secret and the exact command. Read-only
-and non-prod secrets run without a prompt. This is the human-in-the-loop control
-that catches a command which would otherwise misuse a credential — see the
-threat model. Set `KEYMAXXER_APPROVE=allow|deny` to force a decision for headless/CI.
+Both interactions happen through a native dialog, so an agent can keep working
+and you never drop to a terminal:
+
+- **Locked vault.** When an agent calls a tool against a locked vault, keymaxxer
+  pops a dialog asking for your passphrase and unlocks it in place. (Agents are
+  told *not* to suggest `keymaxxer unlock` — the call itself prompts you.)
+- **Sensitive use.** Using a **read-write** or **production** secret is gated.
+  The dialog shows the secret and the exact command and offers **Deny**,
+  **Allow once**, or **Allow for the session**. *Allow for the session* remembers
+  that one secret until the vault locks, so you aren't re-prompted on every call.
+  Read-only / non-prod secrets run with no prompt.
+
+This is the human-in-the-loop control that catches a command which would
+otherwise misuse a credential (see the threat model). `keymaxxer status` lists
+the secrets approved for the current session. For headless/CI, set
+`KEYMAXXER_APPROVE=deny|once|session` and `KEYMAXXER_PASSPHRASE` to unlock
+non-interactively.
 
 ## Where things live, and how access is controlled
 

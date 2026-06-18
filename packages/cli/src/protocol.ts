@@ -24,6 +24,8 @@ export interface StatusResult {
   vault: string;
   idleSeconds: number;
   idleTimeoutSeconds: number;
+  /** Sensitive secrets approved "for the session" (no re-prompt until lock). */
+  sessionApproved: string[];
 }
 
 export type { SecretMeta, RunResult, AuditEntry };

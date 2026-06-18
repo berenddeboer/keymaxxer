@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getClient } from "./client.js";
+import { ensureUnlockedClient } from "./client.js";
 
 /**
  * Start the keymaxxer MCP server on stdio. It holds no key: every call is resolved
@@ -21,7 +21,7 @@ export async function serve(): Promise<void> {
     },
     async () => {
       try {
-        const client = await getClient();
+        const client = await ensureUnlockedClient();
         const metas = await client.list();
         await client.close();
         return { content: [{ type: "text", text: JSON.stringify(metas, null, 2) }] };
@@ -35,7 +35,7 @@ export async function serve(): Promise<void> {
     "keymaxxer_run",
     {
       description:
-        "Run a shell command with secrets injected as environment variables. Reference each secret as $NAME (e.g. \"gh api /user\" with GITHUB_TOKEN, or curl -H \"Authorization: Bearer $TOKEN\"). Secret values are injected into the child process only; they are scrubbed from the returned output and never exposed to you. Use keymaxxer_list to find available names. Note: read-write or production secrets are gated — the human is asked to approve the use, so the call may pause briefly and can be denied; if denied, pick a less-privileged secret or ask the user.",
+        "Run a shell command with secrets injected as environment variables. Reference each secret as $NAME (e.g. \"gh api /user\" with GITHUB_TOKEN, or curl -H \"Authorization: Bearer $TOKEN\"). Secret values are injected into the child process only; they are scrubbed from the returned output and never exposed to you. Use keymaxxer_list to find available names. Note: if the vault is locked the human is prompted to unlock it (the call may pause). Read-write or production secrets are gated — the human approves the use and may allow it just once or for the whole session; the call may pause and can be denied. If denied, pick a less-privileged secret or ask the user. Don't tell the user to run `keymaxxer unlock` themselves — just make the call and it will prompt them.",
       inputSchema: {
         command: z.string().describe("Shell command to run. Reference secrets as $NAME."),
         secrets: z.array(z.string()).describe("Names of secrets to inject as environment variables."),
@@ -45,7 +45,7 @@ export async function serve(): Promise<void> {
     },
     async (args) => {
       try {
-        const client = await getClient();
+        const client = await ensureUnlockedClient();
         const res = await client.run(args);
         await client.close();
         const lines = [

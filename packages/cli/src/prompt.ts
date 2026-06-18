@@ -1,9 +1,13 @@
+import { spawn } from "node:child_process";
+
 // Non-TTY line reader, so a passphrase can be piped in (`printf pass | keymaxxer unlock`).
-// Buffers stdin and hands out one line per request, supporting sequential reads.
+// Buffers stdin and hands out one line per request; resolves null once stdin ends with
+// nothing left (e.g. Claude Code's `!` runs commands with no usable stdin).
 let stdinAttached = false;
 let buffer = "";
+let ended = false;
 const queued: string[] = [];
-const waiters: ((line: string) => void)[] = [];
+const waiters: ((line: string | null) => void)[] = [];
 function attachStdinLines(): void {
   if (stdinAttached) return;
   stdinAttached = true;
@@ -18,11 +22,21 @@ function attachStdinLines(): void {
       else queued.push(line);
     }
   });
+  process.stdin.on("end", () => {
+    ended = true;
+    if (buffer.length) {
+      queued.push(buffer); // trailing line with no newline (e.g. `printf %s pass`)
+      buffer = "";
+    }
+    while (waiters.length) waiters.shift()!(queued.shift() ?? null);
+  });
+  process.stdin.resume();
 }
-function nextLine(): Promise<string> {
+function nextLine(): Promise<string | null> {
   attachStdinLines();
   const q = queued.shift();
   if (q !== undefined) return Promise.resolve(q);
+  if (ended) return Promise.resolve(null);
   return new Promise((res) => waiters.push(res));
 }
 
@@ -48,18 +62,15 @@ export function readHiddenLine(promptText: string): Promise<string> {
       for (const ch of d.toString("utf8")) {
         const code = ch.charCodeAt(0);
         if (code === 13 || code === 10) {
-          // Enter
           cleanup();
           process.stderr.write("\n");
           resolve(buf);
           return;
         } else if (code === 3) {
-          // Ctrl-C
           cleanup();
           process.stderr.write("\n");
           process.exit(130);
         } else if (code === 127 || code === 8) {
-          // Backspace / Delete
           buf = buf.slice(0, -1);
         } else if (code >= 32) {
           buf += ch;
@@ -70,13 +81,49 @@ export function readHiddenLine(promptText: string): Promise<string> {
   });
 }
 
+function asAppleScript(s: string): string {
+  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ") + '"';
+}
+
 /**
- * Read a passphrase from the terminal without echoing it. In a non-interactive
- * context (no TTY), reads one line from stdin so it can be piped in.
+ * Pop a native macOS dialog with a hidden text field and resolve the entered
+ * passphrase — or null if cancelled, dismissed, or not on macOS. This is how
+ * unlocking works from a context with no stdin (Claude Code's `!`, or an agent
+ * tool call that hits a locked vault).
  */
-export function readPassphrase(promptText: string): Promise<string> {
-  if (!process.stdin.isTTY) return nextLine();
-  return readHiddenLine(promptText);
+export function promptPassphraseGui(message: string): Promise<string | null> {
+  if (process.platform !== "darwin") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const script =
+      `display dialog ${asAppleScript(message)} default answer "" with hidden answer ` +
+      `with title "keymaxxer — unlock vault" ` +
+      `buttons {"Cancel", "Unlock"} default button "Unlock" cancel button "Cancel"`;
+    const proc = spawn("osascript", ["-e", script]);
+    let out = "";
+    proc.stdout.on("data", (c) => (out += c.toString()));
+    proc.on("error", () => resolve(null)); // osascript missing
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(null); // Cancel / Esc
+      const m = out.match(/text returned:([\s\S]*)$/);
+      resolve(m ? m[1].replace(/\n$/, "") : "");
+    });
+  });
+}
+
+/**
+ * Acquire a passphrase, trying every channel in order so it works everywhere:
+ * the KEYMAXXER_PASSPHRASE env (headless/automation), an interactive TTY
+ * (hidden), piped stdin (scripts), then a native GUI dialog (macOS).
+ */
+export async function readPassphrase(promptText: string): Promise<string> {
+  const env = process.env.KEYMAXXER_PASSPHRASE;
+  if (env) return env;
+  if (process.stdin.isTTY) return readHiddenLine(promptText);
+  const piped = await nextLine();
+  if (piped) return piped;
+  const gui = await promptPassphraseGui(promptText.replace(/:\s*$/, ""));
+  if (gui) return gui;
+  throw new Error("no passphrase provided (no TTY, no piped input, no GUI available).");
 }
 
 /** Prompt twice and confirm the two entries match. */

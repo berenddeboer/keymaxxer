@@ -53,6 +53,9 @@ export async function runAgent(): Promise<void> {
 
   let lastActivity = Date.now();
   const unlockedAt = Date.now();
+  // Secrets the human approved "for the session" — cleared when the daemon
+  // locks/idles (i.e. the session ends with the key being wiped).
+  const sessionApproved = new Set<string>();
 
   const shutdown = (reason: string) => {
     log(`locking (${reason})`);
@@ -76,30 +79,38 @@ export async function runAgent(): Promise<void> {
             vault: vaultPath(),
             idleSeconds: Math.floor((Date.now() - lastActivity) / 1000),
             idleTimeoutSeconds: Math.floor(idleMs / 1000),
+            sessionApproved: Array.from(sessionApproved),
           };
           return { ok: true, result };
         }
         case "list":
           return { ok: true, result: await store.list() };
         case "run": {
-          // Sensitive secrets (read-write / prod) require interactive approval.
+          // Sensitive secrets (read-write / prod) require interactive approval —
+          // unless the human already approved them "for the session".
           const metas = await store.list();
           const sensitive = req.req.secrets
             .map((n) => metas.find((m) => m.name === n))
             .filter((m): m is SecretMeta => !!m && isSensitive(m));
-          if (sensitive.length > 0) {
-            const names = sensitive.map((s) => s.name).join(", ");
-            const ok = await requestApproval({
-              secrets: sensitive,
+          const needPrompt = sensitive.filter((s) => !sessionApproved.has(s.name));
+          if (needPrompt.length > 0) {
+            const names = needPrompt.map((s) => s.name).join(", ");
+            const decision = await requestApproval({
+              secrets: needPrompt,
               command: req.req.command,
               cwd: req.req.cwd ?? process.cwd(),
             });
-            if (!ok) {
+            if (decision === "deny") {
               await store.auditDenied(req.req.secrets, req.req.command, req.req.cwd ?? process.cwd());
               log(`DENIED [${names}]: ${req.req.command}`);
               return { ok: false, error: `Denied: use of ${names} was not approved by the user.` };
             }
-            log(`approved [${names}]`);
+            if (decision === "session") {
+              needPrompt.forEach((s) => sessionApproved.add(s.name));
+              log(`approved [${names}] for the session`);
+            } else {
+              log(`approved [${names}] once`);
+            }
           }
           return { ok: true, result: await store.run(req.req) };
         }

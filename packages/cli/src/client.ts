@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import {
   SecretStore,
+  WrongKeyError,
+  deriveKey,
+  loadMeta,
   type AuditEntry,
   type RunRequest,
   type RunResult,
@@ -9,6 +12,7 @@ import {
   type SecretMeta,
 } from "keymaxxer-sdk";
 import { pidPath, socketPath, vaultPath } from "./paths.js";
+import { promptPassphraseGui } from "./prompt.js";
 import { sendRequest, type Request, type Response, type StatusResult } from "./protocol.js";
 import { selfCommand } from "./self.js";
 
@@ -111,6 +115,44 @@ export async function getClient(): Promise<VaultClient> {
   }
   if (await isAgentAlive()) return new DaemonClient();
   throw new Error("vault is locked. Run `keymaxxer unlock` first (or set KEYMAXXER_MASTER_KEY).");
+}
+
+/**
+ * Like getClient(), but if the vault is locked it unlocks it in place: it asks
+ * the human for the passphrase via a native dialog (macOS), derives the key, and
+ * starts the agent. This lets an agent's tool call unlock the vault without
+ * anyone leaving their editor. Falls back to the locked error when there is no
+ * passphrase channel (no GUI, no KEYMAXXER_PASSPHRASE).
+ */
+export async function ensureUnlockedClient(): Promise<VaultClient> {
+  const envKey = process.env.KEYMAXXER_MASTER_KEY;
+  if (envKey) {
+    if (!HEX64.test(envKey)) throw new Error("KEYMAXXER_MASTER_KEY must be 64 hex characters.");
+    return DirectStore.open(envKey.toLowerCase());
+  }
+  if (await isAgentAlive()) return new DaemonClient();
+
+  const meta = loadMeta(vaultPath());
+  if (!meta) throw new Error("no vault found. Run `keymaxxer init` first.");
+  if (meta.kdf !== "scrypt" || !meta.salt) throw new Error("vault is locked. Set KEYMAXXER_MASTER_KEY.");
+
+  const passphrase =
+    process.env.KEYMAXXER_PASSPHRASE ||
+    (await promptPassphraseGui(
+      "An agent wants to use a secret. Enter your keymaxxer passphrase to unlock the vault:",
+    ));
+  if (!passphrase) throw new Error("vault is locked — unlock was cancelled.");
+
+  const hexkey = deriveKey(passphrase, meta.salt, meta.scrypt);
+  try {
+    const probe = await SecretStore.open({ path: vaultPath(), hexkey });
+    await probe.close();
+  } catch (err) {
+    if (err instanceof WrongKeyError) throw new Error("wrong passphrase — vault stays locked.");
+    throw err;
+  }
+  await spawnAgent(hexkey);
+  return new DaemonClient();
 }
 
 /** Tell the running daemon to lock and exit. Returns false if none was running. */

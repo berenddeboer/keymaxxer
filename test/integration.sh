@@ -79,10 +79,21 @@ contains "read-only/dev runs without approval" "$($SH run --secrets RO_KEY -- 'e
 contains "read-write/prod is denied" "$($SH run --secrets PROD_RW -- 'echo $PROD_RW' 2>&1)" "was not approved"
 contains "denial is recorded in the audit log" "$($SH audit --limit 10)" "DENIED"
 
-echo "## approval policy (allow)"
+echo "## approval policy (allow once)"
 $SH lock >/dev/null 2>&1
 printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=allow $SH unlock >/dev/null 2>&1
 contains "sensitive secret runs once approved" "$($SH run --secrets PROD_RW -- 'echo rw=$PROD_RW' 2>/dev/null)" "rw=***"
+absent   "an 'allow once' approval does not persist" "$($SH status)" "Session-approved"
+
+echo "## approval policy (allow for session)"
+$SH lock >/dev/null 2>&1
+printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=session $SH unlock >/dev/null 2>&1
+$SH run --secrets PROD_RW -- 'echo first=$PROD_RW' >/dev/null 2>&1   # first use grants the session
+contains "secret is remembered for the session" "$($SH status)" "Session-approved (no re-prompt until lock): PROD_RW"
+contains "session-approved secret runs again" "$($SH run --secrets PROD_RW -- 'echo again=$PROD_RW' 2>/dev/null)" "again=***"
+$SH lock >/dev/null 2>&1
+printf '%s\n' "$PASS" | KEYMAXXER_APPROVE=deny $SH unlock >/dev/null 2>&1
+absent   "session approval is cleared after lock" "$($SH status)" "Session-approved"
 
 echo
 if [ "$KO" -eq 0 ]; then
