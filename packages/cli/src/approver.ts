@@ -31,23 +31,23 @@ function describe(req: ApprovalRequest): string[] {
     .join(", ");
   const cmd = req.command.length > 200 ? req.command.slice(0, 197) + "..." : req.command;
   return [
-    "An agent wants to USE a sensitive secret:",
     `Secret: ${names}`,
     `Command: ${cmd}`,
     `Dir: ${req.cwd}`,
-    "Allow once = this command. Allow session = until the vault locks.",
+    "",
+    "Allow once = this command only.   Allow session = until the vault locks.",
   ];
 }
 
 /** A user's response to an approval prompt. */
 export type ApprovalDecision = "deny" | "once" | "session";
 
-/** Pop a native macOS dialog and resolve the user's choice. */
+/** Pop a native macOS alert and resolve the user's choice. */
 function approveViaOsascript(req: ApprovalRequest): Promise<ApprovalDecision> {
   return new Promise((resolve) => {
     const body = describe(req).map(asQuote).join(" & return & ");
     const script =
-      `display dialog ${body} with title "keymaxxer — approve secret use" ` +
+      `display alert "An agent wants to use a sensitive secret" message (${body}) as critical ` +
       `buttons {"Deny", "Allow once", "Allow session"} default button "Allow once" ` +
       `cancel button "Deny" giving up after 60`;
     const proc = spawn("osascript", ["-e", script]);

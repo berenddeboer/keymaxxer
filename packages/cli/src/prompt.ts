@@ -96,7 +96,7 @@ export function promptPassphraseGui(message: string): Promise<string | null> {
   return new Promise((resolve) => {
     const script =
       `display dialog ${asAppleScript(message)} default answer "" with hidden answer ` +
-      `with title "keymaxxer — unlock vault" ` +
+      `with icon note with title "keymaxxer — unlock vault" ` +
       `buttons {"Cancel", "Unlock"} default button "Unlock" cancel button "Cancel" ` +
       `giving up after 120`;
     const proc = spawn("osascript", ["-e", script]);

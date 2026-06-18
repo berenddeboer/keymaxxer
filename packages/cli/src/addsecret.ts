@@ -31,7 +31,7 @@ function dialog(message: string, prefill: string, saveLabel: string): Promise<st
   return new Promise((resolve) => {
     const script =
       `display dialog ${asAppleScript(message)} default answer ${asAppleScript(prefill)} ` +
-      `with title "keymaxxer — add secret" ` +
+      `with title "keymaxxer — add secret" with icon note ` +
       `buttons {"Cancel", ${asAppleScript(saveLabel)}} default button ${asAppleScript(saveLabel)} ` +
       `cancel button "Cancel" giving up after 180`;
     const proc = spawn("osascript", ["-e", script]);
@@ -54,9 +54,11 @@ function dialog(message: string, prefill: string, saveLabel: string): Promise<st
 function confirm(message: string): Promise<"save" | "edit" | null> {
   if (process.platform !== "darwin") return Promise.resolve(null);
   return new Promise((resolve) => {
-    const body = message.split("\n").map(asAppleScript).join(" & return & ");
+    const lines = message.split("\n");
+    const heading = asAppleScript(lines[0] ?? "");
+    const rest = lines.slice(1).map(asAppleScript).join(" & return & ") || '""';
     const script =
-      `display dialog ${body} with title "keymaxxer — add secret" ` +
+      `display alert ${heading} message (${rest}) as informational ` +
       `buttons {"Edit", "Save"} default button "Save" giving up after 180`;
     const proc = spawn("osascript", ["-e", script]);
     let out = "";
