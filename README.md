@@ -53,13 +53,17 @@ claude mcp add --scope user keymaxxer -- npx keymaxxer serve
 
 ## How an agent uses it
 
-Two MCP tools, neither of which ever returns a secret value:
+Three MCP tools, none of which ever returns a secret value:
 
 - **`keymaxxer_list`** → the names + attributes (provider, account, environment,
   access, tags) of available secrets, so the agent can choose the right one.
 - **`keymaxxer_run`** → run a shell command with named secrets injected as env vars.
   The agent writes `$NAME`; keymaxxer supplies the value to the child process only.
   Read-write/prod secrets prompt you for approval first.
+- **`keymaxxer_add`** → ask you to add a missing secret. The agent suggests the
+  name and attributes; you review/edit them and type the **value** into a dialog —
+  the value goes straight to the vault and is never shared with the agent. (So the
+  agent never tells you to paste a secret into the chat.)
 
 ```jsonc
 // the agent calls:

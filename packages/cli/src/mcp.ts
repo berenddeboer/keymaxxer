@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SecretStore } from "keymaxxer-sdk";
 import { z } from "zod";
+import { promptAddSecret } from "./addsecret.js";
 import { openVaultServe, runGated } from "./client.js";
 
 /**
@@ -84,6 +85,43 @@ export async function serve(): Promise<void> {
           res.stderr,
         ].filter((l) => l !== null);
         return { content: [{ type: "text", text: lines.join("\n") }], isError: res.exitCode !== 0 };
+      } catch (err) {
+        return { content: [{ type: "text", text: errText(err) }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    "keymaxxer_add",
+    {
+      description:
+        "Ask the human to add a new secret to the vault. Suggest the name and any attributes you can infer (provider, account, environment, access, description, tags); the human reviews/edits them in a dialog and types the secret VALUE. The value is saved straight to the encrypted vault and is NEVER returned to you. Use this when a task needs a credential that isn't in keymaxxer_list yet — never ask the user to paste a secret into the chat.",
+      inputSchema: {
+        name: z.string().describe("Suggested secret name, e.g. GITHUB_TOKEN or ORB_PROD_TOKEN."),
+        provider: z.string().optional().describe("e.g. github, orb, stripe"),
+        account: z.string().optional().describe("which account/org the credential belongs to"),
+        environment: z.string().optional().describe("prod / dev / staging / test"),
+        access: z.string().optional().describe("read-only / read-write / admin"),
+        description: z.string().optional(),
+        tags: z.string().optional().describe("comma-separated"),
+      },
+    },
+    async (args) => {
+      try {
+        const store = await vault();
+        const result = await promptAddSecret(args);
+        if (!result) {
+          return { content: [{ type: "text", text: "The user cancelled — no secret was added." }] };
+        }
+        await store.set(result.name, result.value, result.fields);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Stored '${result.name}'. The value was entered by the user and is not shown to you — use it with keymaxxer_run as $${result.name}.`,
+            },
+          ],
+        };
       } catch (err) {
         return { content: [{ type: "text", text: errText(err) }], isError: true };
       }
