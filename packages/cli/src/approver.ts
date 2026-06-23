@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { SecretMeta } from "keymaxxer-sdk";
+import { approveLinux } from "./linux-dialog.js";
 
 /**
  * A secret is "sensitive" — and therefore requires interactive approval before
@@ -67,8 +68,8 @@ function approveViaOsascript(req: ApprovalRequest): Promise<ApprovalDecision> {
  * Ask the human to approve a sensitive secret use. Returns "deny", "once" (this
  * command only), or "session" (allow this secret until the vault locks). The
  * `KEYMAXXER_APPROVE` env forces a decision (deny | once | allow | session) for
- * headless/CI use and tests. Otherwise we prompt natively on macOS; with no
- * interactive channel we fail closed (deny).
+ * headless/CI use and tests. Otherwise we prompt natively where supported; with
+ * no interactive channel we fail closed (deny).
  */
 export async function requestApproval(req: ApprovalRequest): Promise<ApprovalDecision> {
   const override = (process.env.KEYMAXXER_APPROVE ?? "").toLowerCase();
@@ -76,5 +77,6 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalDec
   if (override === "session") return "session";
   if (override === "allow" || override === "once") return "once";
   if (process.platform === "darwin") return approveViaOsascript(req);
+  if (process.platform === "linux") return (await approveLinux(describe(req).join("\n"))) ?? "deny";
   return "deny";
 }
