@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { SecretFields } from "keymaxxer-sdk";
+import { confirmSaveLinux, promptTextLinux } from "./linux-dialog.js";
 
 /** Attributes an agent suggests for a new secret; the human reviews/edits them. */
 export interface AddSuggestion {
@@ -24,9 +25,10 @@ function asAppleScript(s: string): string {
 
 /**
  * Show a native dialog with one (visible) editable text field. Resolves the
- * entered text, or null if cancelled / dismissed / not on macOS.
+ * entered text, or null if cancelled / dismissed / no GUI is available.
  */
 function dialog(message: string, prefill: string, saveLabel: string): Promise<string | null> {
+  if (process.platform === "linux") return promptTextLinux(message, prefill, saveLabel);
   if (process.platform !== "darwin") return Promise.resolve(null);
   return new Promise((resolve) => {
     const script =
@@ -49,9 +51,10 @@ function dialog(message: string, prefill: string, saveLabel: string): Promise<st
 
 /**
  * Show a message-only dialog (no input field) so a long value wraps and is fully
- * readable. Resolves "save", "edit", or null (dismissed / timed out / not macOS).
+ * readable. Resolves "save", "edit", or null (dismissed / timed out / no GUI).
  */
 function confirm(message: string): Promise<"save" | "edit" | null> {
+  if (process.platform === "linux") return confirmSaveLinux(message);
   if (process.platform !== "darwin") return Promise.resolve(null);
   return new Promise((resolve) => {
     const lines = message.split("\n");

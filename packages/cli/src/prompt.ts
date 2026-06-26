@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { promptPassphraseLinux } from "./linux-dialog.js";
 
 // Non-TTY line reader, so a passphrase can be piped in (`printf pass | keymaxxer unlock`).
 // Buffers stdin and hands out one line per request; resolves null once stdin ends with
@@ -92,6 +93,7 @@ function asAppleScript(s: string): string {
  * tool call that hits a locked vault).
  */
 export function promptPassphraseGui(message: string): Promise<string | null> {
+  if (process.platform === "linux") return promptPassphraseLinux(message);
   if (process.platform !== "darwin") return Promise.resolve(null);
   return new Promise((resolve) => {
     const script =
@@ -115,7 +117,7 @@ export function promptPassphraseGui(message: string): Promise<string | null> {
 /**
  * Acquire a passphrase, trying every channel in order so it works everywhere:
  * the KEYMAXXER_PASSPHRASE env (headless/automation), an interactive TTY
- * (hidden), piped stdin (scripts), then a native GUI dialog (macOS).
+ * (hidden), piped stdin (scripts), then a native GUI dialog.
  */
 export async function readPassphrase(promptText: string): Promise<string> {
   const env = process.env.KEYMAXXER_PASSPHRASE;
