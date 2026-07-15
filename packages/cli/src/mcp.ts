@@ -42,7 +42,7 @@ export async function serve(): Promise<void> {
     return store;
   }
 
-  const server = new McpServer({ name: "keymaxxer", version: "0.2.0" });
+  const server = new McpServer({ name: "keymaxxer", version: "0.2.1" });
 
   server.registerTool(
     "keymaxxer_list",
